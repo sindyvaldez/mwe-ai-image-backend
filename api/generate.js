@@ -1,93 +1,235 @@
 import OpenAI from "openai";
 
 /*
- * Serverless API endpoint for generating marketing images.
+ * Serverless API endpoint for the Club AI Plus Creative Studio.
  *
- * This function is designed to run in a serverless environment (e.g. Vercel, Netlify).  It expects a
- * POST request with a JSON body containing `prompt`, `imageType`, `style`, and `accessCode`.
+ * This function:
+ * - validates the hidden access code
+ * - accepts size and quality from Squarespace
+ * - blocks unsupported size/quality values
+ * - builds a stronger marketing image prompt
+ * - sends the request to the OpenAI image API
+ * - returns a base64 PNG image to Squarespace
  *
- * The function validates the access code, constructs a branded prompt, sends a request to the
- * OpenAI image API (GPT‑image‑2), and returns a JSON response containing a base64‑encoded PNG.
- *
- * Environment variables expected:
- *   OPENAI_API_KEY – your OpenAI API key (do not commit this to version control)
- *   ACCESS_CODE    – a secret string used to gate access to the generator
+ * Required Vercel environment variables:
+ * OPENAI_API_KEY
+ * ACCESS_CODE
  */
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-/**
- * Build a prompt for the image API based on user input.
- * The goal is to keep the output business-friendly, white‑label, and suitable for marketing use.
- */
-function buildPrompt({ prompt, imageType, style }) {
-  return `Create a ${imageType} for a business marketing use case.
+const ALLOWED_SIZES = ["1024x1024", "1536x1024", "1024x1536"];
+const ALLOWED_QUALITIES = ["low", "medium", "high"];
+
+function cleanText(value, fallback = "") {
+  if (typeof value !== "string") {
+    return fallback;
+  }
+
+  return value.trim();
+}
+
+function normalizeSize(size) {
+  if (ALLOWED_SIZES.includes(size)) {
+    return size;
+  }
+
+  return "1024x1024";
+}
+
+function normalizeQuality(quality) {
+  if (ALLOWED_QUALITIES.includes(quality)) {
+    return quality;
+  }
+
+  return "medium";
+}
+
+function getFormatInstruction(size) {
+  if (size === "1536x1024") {
+    return `
+This is a landscape image.
+Use a wide horizontal composition.
+Make it suitable for website banners, blog headers, email headers, and horizontal marketing placements.
+Keep important subjects away from the far left and far right edges.
+Leave visual breathing room for cropping or text overlay.
+`;
+  }
+
+  if (size === "1024x1536") {
+    return `
+This is a portrait image.
+Use a vertical composition.
+Make it suitable for Stories, Reels covers, Pinterest pins, vertical ads, and mobile-first placements.
+Keep the main subject centered vertically and avoid cutting off key details.
+Leave room near the top or lower third for optional text overlay.
+`;
+  }
+
+  return `
+This is a square image.
+Use a balanced 1:1 composition.
+Make it suitable for Instagram, Facebook, LinkedIn, and general social media posts.
+Keep the main subject centered and avoid crowding the edges.
+`;
+}
+
+function buildPrompt({
+  prompt,
+  imageType,
+  platform,
+  style,
+  textPreference,
+  avoid,
+  size,
+}) {
+  const formatInstruction = getFormatInstruction(size);
+
+  return `
+Create a ${imageType || "marketing image"} for a business marketing use case.
+
+Output format:
+- Exact requested image size: ${size}
+${formatInstruction}
+
+Platform or use:
+- ${platform || "General marketing"}
 
 Brand direction:
-- White‑label marketing imagery
+- Brand feel: ${style || "professional and polished"}
 - Professional and commercially usable
-- Style: ${style}
 - Clean composition
-- Avoid clutter or busy backgrounds
-- Avoid fake logos or contact information
+- Strong lighting
+- Clear focal point
+- Polished marketing quality
+- Avoid cluttered backgrounds
+- Avoid fake logos, fake phone numbers, fake addresses, and messy unreadable text
+
+Text direction:
+- ${textPreference || "No text on the image. Leave room for text overlay later."}
+
+Avoid:
+- ${avoid || "distorted hands, fake logos, messy text, clutter, low-quality details, awkward cropping"}
 
 User request:
-${prompt}`;
+${prompt}
+`;
 }
 
 export default async function handler(req, res) {
-  // Allow CORS for any origin (if you want to restrict to a specific domain, set it here)
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // Return early for CORS preflight requests
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({
+      error: "Method not allowed.",
+    });
   }
 
   try {
-    const { prompt, imageType, style, accessCode } = req.body;
+    const {
+      prompt,
+      imageType,
+      platform,
+      style,
+      textPreference,
+      avoid,
+      size,
+      quality,
+      accessCode,
+    } = req.body || {};
 
-    // Validate access code
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({
+        error: "Server configuration error. Missing OpenAI API key.",
+      });
+    }
+
+    if (!process.env.ACCESS_CODE) {
+      return res.status(500).json({
+        error: "Server configuration error. Missing access code.",
+      });
+    }
+
     if (!accessCode || accessCode !== process.env.ACCESS_CODE) {
-      return res.status(401).json({ error: "Invalid access code" });
+      return res.status(401).json({
+        error: "Unauthorized request.",
+      });
     }
 
-    // Validate prompt length
-    if (!prompt || prompt.length < 10) {
-      return res.status(400).json({ error: "Please provide a more detailed prompt." });
-    }
-    if (prompt.length > 1500) {
-      return res.status(400).json({ error: "Please keep the prompt under 1,500 characters." });
+    const cleanedPrompt = cleanText(prompt);
+
+    if (!cleanedPrompt || cleanedPrompt.length < 10) {
+      return res.status(400).json({
+        error: "Please provide a more detailed prompt.",
+      });
     }
 
-    const finalPrompt = buildPrompt({ prompt, imageType, style });
+    if (cleanedPrompt.length > 3000) {
+      return res.status(400).json({
+        error: "Please keep the prompt shorter.",
+      });
+    }
 
-    // Request an image from OpenAI.  We request a single image with medium quality at 1024×1024.
+    const finalSize = normalizeSize(size);
+    const finalQuality = normalizeQuality(quality);
+
+    const finalPrompt = buildPrompt({
+      prompt: cleanedPrompt,
+      imageType: cleanText(imageType, "marketing image"),
+      platform: cleanText(platform, "General marketing"),
+      style: cleanText(style, "professional and polished"),
+      textPreference: cleanText(
+        textPreference,
+        "No text on the image. Leave room for text overlay later."
+      ),
+      avoid: cleanText(
+        avoid,
+        "distorted hands, fake logos, messy text, clutter, low-quality details, awkward cropping"
+      ),
+      size: finalSize,
+    });
+
+    console.log("Generating image with:", {
+      size: finalSize,
+      quality: finalQuality,
+      imageType,
+      platform,
+    });
+
     const result = await openai.images.generate({
       model: "gpt-image-2",
       prompt: finalPrompt,
       n: 1,
-      size: "1024x1024",
+      size: finalSize,
+      quality: finalQuality,
     });
 
     const imageData = result.data?.[0]?.b64_json;
+
     if (!imageData) {
-      throw new Error("Failed to retrieve image data from OpenAI");
+      throw new Error("Failed to retrieve image data from OpenAI.");
     }
 
-    // Return the image data as a data URI
-    const dataUri = `data:image/png;base64,${imageData}`;
-    return res.status(200).json({ image: dataUri });
-  } catch (err) {
-    console.error("Image generation error:", err);
-    return res.status(500).json({ error: "An error occurred while generating the image" });
+    return res.status(200).json({
+      image: `data:image/png;base64,${imageData}`,
+      metadata: {
+        size: finalSize,
+        quality: finalQuality,
+      },
+    });
+  } catch (error) {
+    console.error("Image generation error:", error);
+
+    return res.status(500).json({
+      error: "An error occurred while generating the image.",
+    });
   }
 }
