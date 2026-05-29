@@ -3,12 +3,6 @@ import OpenAI from "openai";
 /*
  * Serverless API endpoint for improving image prompts.
  *
- * This function:
- * - validates the hidden access code
- * - accepts the user's rough prompt and form settings
- * - calls OpenAI text generation
- * - returns a polished image-generation prompt
- *
  * Required Vercel environment variables:
  * OPENAI_API_KEY
  * ACCESS_CODE
